@@ -1,3 +1,0 @@
-"C:\Program Files\bin\cmake.exe" -E rm -f CMakeFiles\BillingSystem.dir/objects.a
-D:\mingw64\bin\ar.exe qc CMakeFiles\BillingSystem.dir/objects.a @CMakeFiles\BillingSystem.dir\objects1.rsp
-D:\mingw64\bin\c++.exe -Wl,--whole-archive CMakeFiles\BillingSystem.dir/objects.a -Wl,--no-whole-archive -o BillingSystem.exe -Wl,--out-implib,libBillingSystem.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\BillingSystem.dir\linkLibs.rsp
