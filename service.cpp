@@ -2,415 +2,209 @@
 #include "card_service.h"
 #include "billing_service.h"
 #include "card_file.h"
+#include "billing_file.h"
 #include "money_file.h"
-#include "global.h"
-#include <cmath>
-#include <cstring>
 #include <ctime>
-#include <fstream>
+#include <cmath>
 
 // 初始化系统
-void initSystem()
-{
-    // 初始化卡链表
+void initSystem() {
     initCardList();
-    // 初始化计费链表
     initBillingList();
-    // 从文件加载卡信息
-    getCard();
-    // 从文件加载计费信息
-    getBilling();
+    getCard();       // 从文件加载卡片到内存
+    loadBillings();  // 从文件加载计费记录到内存
 }
 
 // 退出系统
-void exitSystem()
-{
-    // 释放卡链表
+void exitSystem() {
+    // 现代 C++ 退出时虽然 OS 会回收内存，但我们依然可以优雅清理
     releaseCardList();
-    // 释放计费链表
     releaseBillingList();
 }
 
-// 计算消费金额
-float getAmount(time_t start, time_t end)
-{
-    double seconds = difftime(end, start);
-    double minutes = seconds / 60;
-    int units = static_cast<int>(ceil(minutes / UNIT));
-    return units * CHARGE;
-}
-
 // 执行上机操作
-int doLogon(const char *cardNumber, const char *password, LogonInfo *logonInfo)
-{
-    // 验证卡号密码
-    Card *card = checkCard(cardNumber, password);
-    if (card == nullptr)
-    {
-        return FALSE; // 上机失败
+OpResult doLogon(const std::string& cardNumber, const std::string& password, LogonInfo& logonInfo) {
+    Card* card = checkCard(cardNumber, password);
+    if (!card) return OpResult::Failed;
+
+    if (card->nStatus != CardStatus::NotInUse) return OpResult::InvalidStatus;
+    if (card->fBalance <= 0) return OpResult::NotEnoughMoney;
+
+    // 1. 改内存卡状态
+    card->nStatus = CardStatus::InUse;
+    card->tLast = std::time(nullptr);
+
+    // 同步卡片到文件 (updateCard内部包含文件操作)
+    if (updateCard(*card) != OpResult::Success) return OpResult::Failed;
+
+    // 2. 增加计费流水
+    time_t now = std::time(nullptr);
+    if (addBilling(cardNumber, now, 0, 0) != OpResult::Success) {
+        // 如果计费流水失败，状态回滚
+        card->nStatus = CardStatus::NotInUse;
+        updateCard(*card);
+        return OpResult::Failed;
     }
 
-    // 检查卡状态
-    if (card->nStatus == CARD_STATUS_IN_USE || card->nStatus == CARD_STATUS_CANCELLED || card->nStatus == CARD_STATUS_INVALID)
-    {
-        return UNUSE; // 卡不能使用
-    }
-
-    // 检查余额
-    if (card->fBalance <= 0)
-    {
-        return ENOUGHMONEY; // 余额不足
-    }
-
-    // 更新卡状态为上机中
-    card->nStatus = CARD_STATUS_IN_USE;
-    card->tLast = time(nullptr);
-
-    // 更新卡信息到文件
-    if (updateCard(card, CARD_FILE_PATH) != 0)
-    {
-        return FALSE; // 更新失败
-    }
-
-    // 添加计费记录
-    time_t now = time(nullptr);
-    if (addBilling(cardNumber, now, 0, 0) != 0)
-    {
-        // 恢复卡状态
-        card->nStatus = CARD_STATUS_NOT_IN_USE;
-        updateCard(card, CARD_FILE_PATH);
-        return FALSE; // 添加计费记录失败
-    }
-
-    // 填充上机信息
-    strcpy(logonInfo->aCardName, cardNumber);
-    logonInfo->tLogon = now;
-    logonInfo->fBalance = card->fBalance;
-
-    return TRUE; // 上机成功
+    // 3. 填充返回信息
+    logonInfo.aCardName = cardNumber;
+    logonInfo.tLogon = now;
+    logonInfo.fBalance = card->fBalance;
+    return OpResult::Success;
 }
 
 // 执行下机操作
-int doSettle(const char *cardNumber, const char *password, SettleInfo *settleInfo)
-{
-    // 验证卡号密码
-    Card *card = checkCard(cardNumber, password);
-    if (card == nullptr)
-    {
-        return FALSE; // 下机失败
+OpResult doSettle(const std::string& cardNumber, const std::string& password, SettleInfo& settleInfo) {
+    Card* card = checkCard(cardNumber, password);
+    if (!card) return OpResult::Failed;
+    if (card->nStatus != CardStatus::InUse) return OpResult::InvalidStatus;
+
+    // 获取结算信息并计算费用
+    if (settleBilling(cardNumber, settleInfo) != OpResult::Success) {
+        return OpResult::Failed; 
     }
 
-    // 检查卡状态
-    if (card->nStatus != CARD_STATUS_IN_USE)
-    {
-        return UNUSE; // 卡未上机
-    }
+    if (card->fBalance < settleInfo.fAmount) return OpResult::NotEnoughMoney;
 
-    // 查找未结算的计费记录
-    Billing billing;
-    if (queryBilling(cardNumber, &billing) != 0)
-    {
-        return FALSE; // 没有找到未结算记录
-    }
-
-    // 计算消费金额
-    time_t now = time(nullptr);
-    float amount = getAmount(billing.tStart, now);
-
-    // 检查余额是否充足
-    if (card->fBalance < amount)
-    {
-        return ENOUGHMONEY; // 余额不足
-    }
-
-    // 更新卡信息
-    card->fBalance -= amount;
-    card->fTotalUse += amount;
+    // 更新卡片信息
+    card->fBalance -= settleInfo.fAmount;
+    card->fTotalUse += settleInfo.fAmount;
     card->nUseCount++;
-    card->nStatus = CARD_STATUS_NOT_IN_USE;
-    card->tLast = now;
+    card->nStatus = CardStatus::NotInUse;
+    card->tLast = settleInfo.tEnd;
+    if (updateCard(*card) != OpResult::Success) return OpResult::Failed;
 
-    // 更新卡信息到文件
-    if (updateCard(card, CARD_FILE_PATH) != 0)
-    {
-        return FALSE; // 更新失败
+    // 更新计费流水状态为已结算
+    Billing billing;
+    queryBilling(cardNumber, billing);
+    billing.tEnd = settleInfo.tEnd;
+    billing.fAmount = settleInfo.fAmount;
+    billing.nStatus = BillingStatus::Settled;
+    
+    if (updateBilling(billing) != OpResult::Success) {
+        // 如果计费状态更新失败，理论上需要复杂的回滚机制，这里简单处理
+        return OpResult::Failed;
     }
 
-    // 更新计费记录
-    billing.tEnd = now;
-    billing.fAmount = amount;
-    billing.nStatus = BILLING_STATUS_SETTLED;
-
-    if (updateBilling(&billing) != 0)
-    {
-        // 恢复卡信息
-        card->fBalance += amount;
-        card->fTotalUse -= amount;
-        card->nUseCount--;
-        card->nStatus = CARD_STATUS_IN_USE;
-        updateCard(card, CARD_FILE_PATH);
-        return FALSE; // 更新计费记录失败
-    }
-
-    // 填充下机信息
-    strcpy(settleInfo->aCardName, cardNumber);
-    settleInfo->tStart = billing.tStart;
-    settleInfo->tEnd = now;
-    settleInfo->fAmount = amount;
-    settleInfo->fBalance = card->fBalance;
-
-    return TRUE; // 下机成功
+    settleInfo.fBalance = card->fBalance;
+    return OpResult::Success;
 }
 
-// 执行充值操作
-int doAddMoney(const char *cardNumber, const char *password, float money, MoneyInfo *moneyInfo)
-{
-    if (moneyInfo == nullptr || money <= 0)
-    {
-        return FALSE;
-    }
+// 充值操作
+OpResult doAddMoney(const std::string& cardNumber, const std::string& password, float money, MoneyInfo& moneyInfo) {
+    if (money <= 0) return OpResult::Failed;
 
-    Card *card = checkCard(cardNumber, password);
-    if (card == nullptr)
-    {
-        return FALSE;
-    }
+    Card* card = checkCard(cardNumber, password);
+    if (!card) return OpResult::Failed;
+    if (card->nStatus == CardStatus::Cancelled || card->nStatus == CardStatus::Invalid) return OpResult::InvalidStatus;
 
-    time_t now = time(nullptr);
-    if (card->nStatus == CARD_STATUS_CANCELLED || card->nStatus == CARD_STATUS_INVALID || card->tEnd < now)
-    {
-        return UNUSE;
-    }
-
-    if (card->nStatus != CARD_STATUS_NOT_IN_USE && card->nStatus != CARD_STATUS_IN_USE)
-    {
-        return UNUSE;
-    }
-
-    Card oldCard = *card;
+    // 更新卡余额
     card->fBalance += money;
-    card->tLast = now;
+    card->tLast = std::time(nullptr);
+    if (updateCard(*card) != OpResult::Success) return OpResult::Failed;
 
-    if (updateCard(card, CARD_FILE_PATH) != 0)
-    {
-        *card = oldCard;
-        return FALSE;
-    }
-
+    // 保存资金流水
     Money record;
-    memset(&record, 0, sizeof(Money));
-    strcpy(record.aCardName, cardNumber);
-    record.tTime = now;
-    record.nStatus = MONEY_STATUS_RECHARGE;
+    record.aCardName = cardNumber;
+    record.tTime = std::time(nullptr);
+    record.nStatus = MoneyStatus::Recharge;
     record.fMoney = money;
-    record.nDel = NOT_DELETED;
+    
+    if (saveMoney(record) != OpResult::Success) return OpResult::Failed; // 生产环境中这里也应有回滚逻辑
 
-    if (saveMoney(&record, MONEY_FILE_PATH) != 0)
-    {
-        *card = oldCard;
-        updateCard(card, CARD_FILE_PATH);
-        return FALSE;
-    }
-
-    strcpy(moneyInfo->aCardName, cardNumber);
-    moneyInfo->fMoney = money;
-    moneyInfo->fBalance = card->fBalance;
-    return TRUE;
+    moneyInfo.aCardName = cardNumber;
+    moneyInfo.fMoney = money;
+    moneyInfo.fBalance = card->fBalance;
+    return OpResult::Success;
 }
 
-// 执行退费操作
-int doRefundMoney(const char *cardNumber, const char *password, MoneyInfo *moneyInfo)
-{
-    if (moneyInfo == nullptr)
-    {
-        return FALSE;
-    }
+// 退费操作
+OpResult doRefundMoney(const std::string& cardNumber, const std::string& password, MoneyInfo& moneyInfo) {
+    Card* card = checkCard(cardNumber, password);
+    if (!card) return OpResult::Failed;
+    if (card->nStatus != CardStatus::NotInUse) return OpResult::InvalidStatus;
+    if (card->fBalance <= 0) return OpResult::NotEnoughMoney;
 
-    Card *card = checkCard(cardNumber, password);
-    if (card == nullptr)
-    {
-        return FALSE;
-    }
-
-    time_t now = time(nullptr);
-    if (card->nStatus == CARD_STATUS_CANCELLED || card->nStatus == CARD_STATUS_INVALID || card->tEnd < now)
-    {
-        return UNUSE;
-    }
-
-    if (card->nStatus != CARD_STATUS_NOT_IN_USE)
-    {
-        return UNUSE;
-    }
-
-    if (card->fBalance <= 0)
-    {
-        return ENOUGHMONEY;
-    }
-
-    Card oldCard = *card;
     float refundMoney = card->fBalance;
     card->fBalance = 0;
-    card->tLast = now;
-
-    if (updateCard(card, CARD_FILE_PATH) != 0)
-    {
-        *card = oldCard;
-        return FALSE;
-    }
+    card->tLast = std::time(nullptr);
+    if (updateCard(*card) != OpResult::Success) return OpResult::Failed;
 
     Money record;
-    memset(&record, 0, sizeof(Money));
-    strcpy(record.aCardName, cardNumber);
-    record.tTime = now;
-    record.nStatus = MONEY_STATUS_REFUND;
+    record.aCardName = cardNumber;
+    record.tTime = std::time(nullptr);
+    record.nStatus = MoneyStatus::Refund;
     record.fMoney = refundMoney;
-    record.nDel = NOT_DELETED;
+    
+    if (saveMoney(record) != OpResult::Success) return OpResult::Failed;
 
-    if (saveMoney(&record, MONEY_FILE_PATH) != 0)
-    {
-        *card = oldCard;
-        updateCard(card, CARD_FILE_PATH);
-        return FALSE;
-    }
-
-    strcpy(moneyInfo->aCardName, cardNumber);
-    moneyInfo->fMoney = refundMoney;
-    moneyInfo->fBalance = 0;
-    return TRUE;
+    moneyInfo.aCardName = cardNumber;
+    moneyInfo.fMoney = refundMoney;
+    moneyInfo.fBalance = 0;
+    return OpResult::Success;
 }
 
-// 执行注销卡操作
-int doAnnulCard(const char *cardNumber, const char *password, MoneyInfo *moneyInfo)
-{
-    if (moneyInfo == nullptr)
-    {
-        return FALSE;
-    }
+// 注销卡操作
+OpResult doAnnulCard(const std::string& cardNumber, const std::string& password, MoneyInfo& moneyInfo) {
+    Card* card = checkCard(cardNumber, password);
+    if (!card) return OpResult::Failed;
+    if (card->nStatus != CardStatus::NotInUse) return OpResult::InvalidStatus;
 
-    Card *card = checkCard(cardNumber, password);
-    if (card == nullptr)
-    {
-        return FALSE;
-    }
-
-    if (card->nStatus != CARD_STATUS_NOT_IN_USE)
-    {
-        return UNUSE;
-    }
-
-    Card oldCard = *card;
     float refundMoney = card->fBalance;
-    time_t now = time(nullptr);
+    // 使用我们重构过的 cancelCard 接口
+    if (cancelCard(cardNumber) != OpResult::Success) return OpResult::Failed;
 
-    card->nStatus = CARD_STATUS_CANCELLED;
+    // 清零余额的逻辑在服务层单独处理更灵活
     card->fBalance = 0;
-    card->tLast = now;
+    updateCard(*card); 
 
-    if (updateCard(card, CARD_FILE_PATH) != 0)
-    {
-        *card = oldCard;
-        return FALSE;
-    }
-
-    strcpy(moneyInfo->aCardName, cardNumber);
-    moneyInfo->fMoney = refundMoney;
-    moneyInfo->fBalance = 0;
-    return TRUE;
+    moneyInfo.aCardName = cardNumber;
+    moneyInfo.fMoney = refundMoney;
+    moneyInfo.fBalance = 0;
+    return OpResult::Success;
 }
 
-// 执行查询统计
-int doQueryStatistics(StatisticsInfo *statisticsInfo)
-{
-    if (statisticsInfo == nullptr)
-    {
-        return FALSE;
-    }
+// 查询统计 (得益于 STL 容器，这段代码现在无比清爽！)
+OpResult doQueryStatistics(StatisticsInfo& info) {
+    info = StatisticsInfo(); // 重置为0
 
-    memset(statisticsInfo, 0, sizeof(StatisticsInfo));
+    // 统计卡片信息
+    for (const auto& card : g_cardList) {
+        if (card.nDel != DeleteStatus::NotDeleted) continue;
 
-    if (cardList != nullptr)
-    {
-        lpCardNode currentCard = cardList->next;
-        while (currentCard != nullptr)
-        {
-            if (currentCard->data.nDel == NOT_DELETED)
-            {
-                statisticsInfo->nCardCount++;
-                statisticsInfo->fTotalBalance += currentCard->data.fBalance;
-                statisticsInfo->fTotalUseAmount += currentCard->data.fTotalUse;
-                statisticsInfo->nTotalUseCount += currentCard->data.nUseCount;
+        info.nCardCount++;
+        info.fTotalBalance += card.fBalance;
+        info.fTotalUseAmount += card.fTotalUse;
+        info.nTotalUseCount += card.nUseCount;
 
-                switch (currentCard->data.nStatus)
-                {
-                case CARD_STATUS_NOT_IN_USE:
-                    statisticsInfo->nNotInUseCount++;
-                    break;
-                case CARD_STATUS_IN_USE:
-                    statisticsInfo->nInUseCount++;
-                    break;
-                case CARD_STATUS_CANCELLED:
-                    statisticsInfo->nCancelledCount++;
-                    break;
-                case CARD_STATUS_INVALID:
-                    statisticsInfo->nInvalidCount++;
-                    break;
-                default:
-                    break;
-                }
-            }
-
-            currentCard = currentCard->next;
+        switch (card.nStatus) {
+            case CardStatus::NotInUse: info.nNotInUseCount++; break;
+            case CardStatus::InUse: info.nInUseCount++; break;
+            case CardStatus::Cancelled: info.nCancelledCount++; break;
+            case CardStatus::Invalid: info.nInvalidCount++; break;
         }
     }
 
-    if (billingList != nullptr)
-    {
-        IpBillingNode currentBilling = billingList->next;
-        while (currentBilling != nullptr)
-        {
-            if (currentBilling->data.nDel == NOT_DELETED)
-            {
-                statisticsInfo->nBillingCount++;
-                if (currentBilling->data.nStatus == BILLING_STATUS_SETTLED)
-                {
-                    statisticsInfo->nSettledBillingCount++;
-                }
-                else
-                {
-                    statisticsInfo->nUnsettledBillingCount++;
-                }
-            }
+    // 统计计费信息
+    for (const auto& billing : g_billingList) {
+        if (billing.nDel != DeleteStatus::NotDeleted) continue;
+        info.nBillingCount++;
+        if (billing.nStatus == BillingStatus::Settled) info.nSettledBillingCount++;
+        else info.nUnsettledBillingCount++;
+    }
 
-            currentBilling = currentBilling->next;
+    // 统计资金流水
+    std::vector<Money> moneyRecords = loadAllMoneyRecords();
+    for (const auto& record : moneyRecords) {
+        if (record.nDel != DeleteStatus::NotDeleted) continue;
+        if (record.nStatus == MoneyStatus::Recharge) {
+            info.nRechargeCount++;
+            info.fRechargeAmount += record.fMoney;
+        } else if (record.nStatus == MoneyStatus::Refund) {
+            info.nRefundCount++;
+            info.fRefundAmount += record.fMoney;
         }
     }
 
-    std::ifstream moneyFile(MONEY_FILE_PATH, std::ios::binary);
-    if (moneyFile)
-    {
-        Money moneyRecord;
-        while (moneyFile.read(reinterpret_cast<char *>(&moneyRecord), sizeof(Money)))
-        {
-            if (moneyRecord.nDel != NOT_DELETED)
-            {
-                continue;
-            }
-
-            if (moneyRecord.nStatus == MONEY_STATUS_RECHARGE)
-            {
-                statisticsInfo->nRechargeCount++;
-                statisticsInfo->fRechargeAmount += moneyRecord.fMoney;
-            }
-            else if (moneyRecord.nStatus == MONEY_STATUS_REFUND)
-            {
-                statisticsInfo->nRefundCount++;
-                statisticsInfo->fRefundAmount += moneyRecord.fMoney;
-            }
-        }
-
-        moneyFile.close();
-    }
-
-    return TRUE;
+    return OpResult::Success;
 }

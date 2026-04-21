@@ -1,355 +1,117 @@
 #include "card_file.h"
+#include "card_service.h" // 为了访问 g_cardList
 #include <fstream>
-#include <cstring>
-#include <sstream>
-#include <iomanip>
-#include <ctime>
-#include <cstdio>
-#include "card_service.h"
+#include <iostream>
 
-namespace
-{
-    int appendCardToList(const Card &card)
-    {
-        lpCardNode newNode = new CardNode;
-        if (newNode == nullptr)
-        {
-            return -1;
-        }
-
-        newNode->data = card;
-        newNode->next = nullptr;
-
-        lpCardNode current = cardList;
-        while (current->next != nullptr)
-        {
-            current = current->next;
-        }
-        current->next = newNode;
-        return 0;
-    }
-
-    int writeCardsToBinaryFile()
-    {
-        std::ofstream file(CARD_FILE_PATH, std::ios::binary | std::ios::trunc);
-        if (!file)
-        {
-            return -1;
-        }
-
-        if (cardList != nullptr)
-        {
-            lpCardNode current = cardList->next;
-            while (current != nullptr)
-            {
-                file.write(reinterpret_cast<const char *>(&current->data), sizeof(Card));
-                if (!file)
-                {
-                    return -2;
-                }
-                current = current->next;
-            }
-        }
-
-        file.close();
-        return 0;
-    }
-
-    int loadCardsFromBinaryFile()
-    {
-        std::ifstream file(CARD_FILE_PATH, std::ios::binary);
-        if (!file)
-        {
-            return 0;
-        }
-
-        int count = 0;
-        Card card;
-        while (file.read(reinterpret_cast<char *>(&card), sizeof(Card)))
-        {
-            if (appendCardToList(card) != 0)
-            {
-                file.close();
-                return -1;
-            }
-            count++;
-        }
-
-        file.close();
-        return count;
-    }
-
-    int loadCardsFromTextFile()
-    {
-        std::ifstream file(CARD_TEXT_FILE_PATH);
-        if (!file)
-        {
-            return 0;
-        }
-
-        std::string line;
-        int count = 0;
-        while (std::getline(file, line))
-        {
-            if (line.empty() || line.find("##") == std::string::npos)
-            {
-                continue;
-            }
-
-            char *buf = new char[line.size() + 1];
-            strcpy(buf, line.c_str());
-            Card card = parseCard(buf);
-            delete[] buf;
-
-            if (strlen(card.aName) == 0)
-            {
-                continue;
-            }
-
-            if (appendCardToList(card) != 0)
-            {
-                file.close();
-                return -1;
-            }
-            count++;
-        }
-
-        file.close();
-
-        if (count > 0)
-        {
-            writeCardsToBinaryFile();
-        }
-
-        return count;
+// --- 序列化辅助函数 ---
+// 将 std::string 安全地写入二进制文件：先写长度，再写内容
+static void writeString(std::ofstream& out, const std::string& str) {
+    size_t len = str.length();
+    out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+    if (len > 0) {
+        out.write(str.data(), len);
     }
 }
 
-// 保存卡信息到文件
-int saveCards(Card cards[], int count)
-{
-    std::ofstream file(CARD_FILE_PATH, std::ios::binary | std::ios::trunc);
-    if (!file)
-    {
-        return -1;
+// 将其他基础数据类型安全写入
+template<typename T>
+static void writeData(std::ofstream& out, const T& data) {
+    out.write(reinterpret_cast<const char*>(&data), sizeof(T));
+}
+
+// 序列化一整张卡片
+static void writeCardData(std::ofstream& out, const Card& card) {
+    writeString(out, card.aName);
+    writeString(out, card.aPwd);
+    writeData(out, card.nStatus);
+    writeData(out, card.tStart);
+    writeData(out, card.tEnd);
+    writeData(out, card.fTotalUse);
+    writeData(out, card.tLast);
+    writeData(out, card.nUseCount);
+    writeData(out, card.fBalance);
+    writeData(out, card.nDel);
+}
+
+// --- 反序列化辅助函数 ---
+// 从二进制文件安全地读取 std::string
+static std::string readString(std::ifstream& in) {
+    size_t len = 0;
+    in.read(reinterpret_cast<char*>(&len), sizeof(len));
+    // 增加安全性校验，防止读到脏数据导致分配超大内存
+    if (in && len > 0 && len < 10000) { 
+        std::string str(len, '\0');
+        in.read(&str[0], len);
+        return str;
     }
-    file.write(reinterpret_cast<char *>(cards), sizeof(Card) * count);
-    file.close();
-    return 0;
+    return "";
 }
 
-// 从文件加载卡信息
-int loadCards(Card cards[])
-{
-    std::ifstream file(CARD_FILE_PATH, std::ios::binary);
-    if (!file)
-    {
-        return 0;
-    }
-    file.seekg(0, std::ios::end);
-    int count = file.tellg() / sizeof(Card);
-    file.seekg(0, std::ios::beg);
-    file.read(reinterpret_cast<char *>(cards), sizeof(Card) * count);
-    file.close();
-    return count;
+// 读取基础数据类型
+template<typename T>
+static T readData(std::ifstream& in) {
+    T data;
+    in.read(reinterpret_cast<char*>(&data), sizeof(T));
+    return data;
 }
 
-// 将时间转换为字符串
-std::string timeToString(time_t t)
-{
-    std::tm *tm_info = std::localtime(&t);
-    std::stringstream ss;
-    ss << std::setw(4) << std::setfill('0') << (tm_info->tm_year + 1900) << "-";
-    ss << std::setw(2) << std::setfill('0') << (tm_info->tm_mon + 1) << "-";
-    ss << std::setw(2) << std::setfill('0') << tm_info->tm_mday << " ";
-    ss << std::setw(2) << std::setfill('0') << tm_info->tm_hour << ":";
-    ss << std::setw(2) << std::setfill('0') << tm_info->tm_min;
-    return ss.str();
-}
-
-// 将字符串转换为时间
-time_t stringToTime(char *pTime)
-{
-    int year, month, day, hour, minute;
-    sscanf(pTime, "%d-%d-%d %d:%d", &year, &month, &day, &hour, &minute);
-
-    std::tm tm_info = {0};
-    tm_info.tm_year = year - 1900;
-    tm_info.tm_mon = month - 1;
-    tm_info.tm_mday = day;
-    tm_info.tm_hour = hour;
-    tm_info.tm_min = minute;
-
-    return mktime(&tm_info);
-}
-
-// 将字符串解析为Card结构体
-Card parseCard(char *pBuf)
-{
+// 反序列化一整张卡片
+static Card readCardData(std::ifstream& in) {
     Card card;
-    memset(&card, 0, sizeof(Card));
-
-    if (pBuf == nullptr || strlen(pBuf) == 0)
-    {
-        return card;
-    }
-
-    char *token = strtok(pBuf, "##");
-
-    if (token)
-    {
-        strncpy(card.aName, token, sizeof(card.aName) - 1);
-        card.aName[sizeof(card.aName) - 1] = '\0';
-    }
-    token = strtok(nullptr, "##");
-    if (token)
-    {
-        strncpy(card.aPwd, token, sizeof(card.aPwd) - 1);
-        card.aPwd[sizeof(card.aPwd) - 1] = '\0';
-    }
-    token = strtok(nullptr, "##");
-    if (token)
-        card.nStatus = std::stoi(token);
-    token = strtok(nullptr, "##");
-    if (token)
-        card.tStart = stringToTime(token);
-    token = strtok(nullptr, "##");
-    if (token)
-        card.tEnd = stringToTime(token);
-    token = strtok(nullptr, "##");
-    if (token)
-        card.fTotalUse = std::stof(token);
-    token = strtok(nullptr, "##");
-    if (token)
-        card.tLast = stringToTime(token);
-    token = strtok(nullptr, "##");
-    if (token)
-        card.nUseCount = std::stoi(token);
-    token = strtok(nullptr, "##");
-    if (token)
-        card.fBalance = std::stof(token);
-    token = strtok(nullptr, "##");
-    if (token)
-        card.nDel = std::stoi(token);
-
+    card.aName = readString(in);
+    card.aPwd = readString(in);
+    card.nStatus = readData<CardStatus>(in);
+    card.tStart = readData<time_t>(in);
+    card.tEnd = readData<time_t>(in);
+    card.fTotalUse = readData<float>(in);
+    card.tLast = readData<time_t>(in);
+    card.nUseCount = readData<int>(in);
+    card.fBalance = readData<float>(in);
+    card.nDel = readData<DeleteStatus>(in);
     return card;
 }
 
-// 保存单条卡信息到二进制文件
-int saveCard(const Card *pCard, const char *pPath)
-{
-    (void)pPath;
+// ---------------- 核心接口实现 ----------------
 
-    std::ofstream file(CARD_FILE_PATH, std::ios::binary | std::ios::app);
-    if (!file)
-    {
-        return -1;
-    }
-
-    file.write(reinterpret_cast<const char *>(pCard), sizeof(Card));
-    if (!file)
-    {
-        return -2;
-    }
-
-    file.close();
-    return 0;
-}
-
-// 获取文件中卡信息的条数
-int getCardCount(const char *pPath)
-{
-    std::ifstream file(pPath);
-    if (!file)
-    {
-        return 0;
-    }
+// 从文件加载所有卡信息
+int getCard() {
+    g_cardList.clear(); // 清空当前内存
+    std::ifstream file(Config::CARD_FILE_PATH, std::ios::binary);
+    if (!file) return 0; // 文件不存在说明是第一次启动
 
     int count = 0;
-    std::string line;
-    while (std::getline(file, line))
-    {
-        count++;
-    }
-
-    file.close();
-    return count;
-}
-
-// 从文件中读取一条卡信息
-int readCard(Card *pCard, const char *pPath)
-{
-    std::ifstream file(pPath);
-    if (!file)
-    {
-        return -1;
-    }
-
-    std::string line;
-    if (std::getline(file, line))
-    {
-        char *buf = new char[line.size() + 1];
-        strcpy(buf, line.c_str());
-        *pCard = parseCard(buf);
-        delete[] buf;
-        file.close();
-        return 0;
-    }
-
-    file.close();
-    return -1;
-}
-
-// 从文件读取所有卡信息到链表
-int getCard()
-{
-    releaseCardList();
-    initCardList();
-
-    int count = loadCardsFromBinaryFile();
-    if (count > 0)
-    {
-        return count;
-    }
-
-    int textCount = loadCardsFromTextFile();
-    if (textCount > 0)
-    {
-        return textCount;
-    }
-
-    return count;
-}
-
-// 更新文件中的卡信息
-int updateCard(const Card *card, const char *pPath)
-{
-    (void)pPath;
-
-    if (card == nullptr || cardList == nullptr)
-    {
-        return -1;
-    }
-
-    lpCardNode current = cardList->next;
-    while (current != nullptr)
-    {
-        if (strcmp(current->data.aName, card->aName) == 0)
-        {
-            Card oldCard = current->data;
-            current->data = *card;
-
-            if (writeCardsToBinaryFile() != 0)
-            {
-                current->data = oldCard;
-                return -2;
-            }
-
-            return 0;
+    while (file.peek() != EOF) {
+        Card card = readCardData(file);
+        if (file.eof()) break; // 防护：如果读取中途遇到文件尾则终止
+        
+        if (!card.aName.empty()) {
+            g_cardList.push_back(card);
+            count++;
         }
-
-        current = current->next;
     }
+    file.close();
+    return count;
+}
 
-    return -1;
+// 追加保存单条卡片
+OpResult saveCard(const Card& card) {
+    std::ofstream file(Config::CARD_FILE_PATH, std::ios::binary | std::ios::app);
+    if (!file) return OpResult::Failed;
+    
+    writeCardData(file, card);
+    file.close();
+    return OpResult::Success;
+}
+
+// 更新文件（全量覆盖保存）
+OpResult updateCardToFile() {
+    // ios::trunc 模式会清空原有文件重新写入
+    std::ofstream file(Config::CARD_FILE_PATH, std::ios::binary | std::ios::trunc);
+    if (!file) return OpResult::Failed;
+
+    for (const auto& card : g_cardList) {
+        writeCardData(file, card);
+    }
+    file.close();
+    return OpResult::Success;
 }

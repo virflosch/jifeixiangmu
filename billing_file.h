@@ -1,13 +1,11 @@
-#ifndef BILLING_FILE_H
-#define BILLING_FILE_H
-
+#pragma once
 #include "model.h"
-#include "global.h"
 
-// 计费文件操作函数
-int saveBilling(const Billing *billing);
+// 从文件加载所有计费记录到内存的 g_billingList
 int loadBillings();
-int getBillingCount();
-int updateBillingInFile(const Billing *billing);
 
-#endif // BILLING_FILE_H
+// 追加保存单条新计费记录到文件尾部
+OpResult saveBilling(const Billing& billing);
+
+// 将内存中所有的计费记录全量覆盖写入文件
+OpResult updateBillingToFile();

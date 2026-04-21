@@ -1,48 +1,50 @@
-#ifndef GLOBAL_H
-#define GLOBAL_H
+#pragma once 
 
-// 卡状态定义
-#define CARD_STATUS_NOT_IN_USE 0 // 未上机
-#define CARD_STATUS_IN_USE 1     // 正在上机
-#define CARD_STATUS_CANCELLED 2  // 已注销
-#define CARD_STATUS_INVALID 3    // 失效
+namespace Config {
+    // 文件路径使用 constexpr 替代宏，更安全
+    constexpr const char* CARD_FILE_PATH = "data/card.ams";
+    constexpr const char* BILLING_FILE_PATH = "billings.dat";
+    constexpr const char* MONEY_FILE_PATH = "data/money.ams";
+    constexpr const char* CARD_TEXT_FILE_PATH = "data/card.txt";
 
-// 消费状态定义
-#define BILLING_STATUS_UNSETTLED 0 // 未结算
-#define BILLING_STATUS_SETTLED 1   // 已经结算
+    // 计费规则与容量限制
+    constexpr int MAX_CARD_COUNT = 1000;
+    constexpr int MAX_BILLING_COUNT = 10000;
+    constexpr int MAX_MONEY_COUNT = 10000;
+    constexpr int UNIT = 15;       // 最小收费单元（分钟）
+    constexpr float CHARGE = 0.5f; // 每个计费单元收费（RMB：元）
+}
 
-// 充值退费状态定义
-#define MONEY_STATUS_RECHARGE 0 // 充值
-#define MONEY_STATUS_REFUND 1   // 退费
+// 卡状态枚举
+enum class CardStatus {
+    NotInUse = 0, // 未上机
+    InUse = 1,    // 正在上机
+    Cancelled = 2,// 已注销
+    Invalid = 3   // 失效
+};
 
-// 删除标识定义
-#define NOT_DELETED 0 // 未删除
-#define DELETED 1     // 删除
+// 消费状态枚举
+enum class BillingStatus {
+    Unsettled = 0, // 未结算
+    Settled = 1    // 已经结算
+};
 
-// 文件路径
-#define CARD_FILE_PATH "data/card.ams"
-#define BILLING_FILE_PATH "billings.dat"
-#define MONEY_FILE_PATH "data/money.ams"
-#define CARD_TEXT_FILE_PATH "data/card.txt"
+// 充值退费状态枚举
+enum class MoneyStatus {
+    Recharge = 0, // 充值
+    Refund = 1    // 退费
+};
 
-// 最大卡数量
-#define MAX_CARD_COUNT 1000
+// 删除标识枚举
+enum class DeleteStatus {
+    NotDeleted = 0, // 未删除
+    Deleted = 1     // 删除
+};
 
-// 最大计费记录数量
-#define MAX_BILLING_COUNT 10000
-
-// 最大充值退费记录数量
-#define MAX_MONEY_COUNT 10000
-
-// 上机相关常量
-#define FALSE 0                         // 上机失败
-#define TRUE 1                          // 上机成功
-#define UNUSE 2                         // 卡不能使用（正在使用或已注销）
-#define ENOUGHMONEY 3                   // 余额不足
-#define BILLINGPATH "data\\billing.ams" // 计费信息保存路径
-
-// 计费规则
-#define UNIT 15    // 最小收费单元（分钟）
-#define CHARGE 0.5 // 每个计费单元收费（RMB：元）
-
-#endif // GLOBAL_H
+// 业务操作返回值枚举 
+enum class OpResult {
+    Success = 1,
+    Failed = 0,
+    InvalidStatus = 2, // 状态异常（如卡正在使用或已注销）
+    NotEnoughMoney = 3 // 余额不足
+};

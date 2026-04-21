@@ -1,29 +1,22 @@
-#ifndef MENU_H
-#define MENU_H
-
+#pragma once
 #include "model.h"
-#include "service.h"
 #include <string>
-#include <cstring>
 
-// 全局变量声明
-extern Card g_cards[1000];
-extern int g_cardCount;
-
-// 函数声明
+// 系统入口
 void startBillingSystem();
+
+// UI 渲染函数
 void printTitle();
 void outputMenu();
 void showSelectedOption(int choice);
 int getUserChoice();
-int findCardIndex(const char *cardNumber);
-void addCard();
-void queryCard();
-void queryStatistics();
-void annul();
-void logon();
-void settle();
-void addMoney();
-void refundMoney();
 
-#endif
+// 各个菜单功能的交互封装
+void handleAddCard();
+void handleQueryCard();
+void handleQueryStatistics();
+void handleAnnulCard();
+void handleLogon();
+void handleSettle();
+void handleAddMoney();
+void handleRefundMoney();

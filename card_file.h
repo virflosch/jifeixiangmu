@@ -1,21 +1,11 @@
-#ifndef CARD_FILE_H
-#define CARD_FILE_H
-
+#pragma once
 #include "model.h"
-#include "global.h"
 
-// 卡文件操作函数
-int saveCards(Card cards[], int count);
-int loadCards(Card cards[]);
-int findCardIndex(Card cards[], int count, const char *cardNumber);
-
-// 文本文件操作函数
-int saveCard(const Card *pCard, const char *pPath);
-int getCardCount(const char *pPath);
-int readCard(Card *pCard, const char *pPath);
+// 从文件加载所有卡信息到内存的 g_cardList，返回加载成功的数量
 int getCard();
-int updateCard(const Card *card, const char *pPath);
-Card parseCard(char *pBuf);
-time_t stringToTime(char *pTime);
 
-#endif // CARD_FILE_H
+// 追加保存单条新卡片到文件尾部
+OpResult saveCard(const Card& card);
+
+// 将内存中所有的卡片全量覆盖写入文件 (用于信息更新时)
+OpResult updateCardToFile();

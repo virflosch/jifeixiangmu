@@ -1,19 +1,15 @@
-#ifndef SERVICE_H
-#define SERVICE_H
-
+#pragma once
 #include "model.h"
+#include <string>
 
-// 通用服务函数
+// 通用系统服务
 void initSystem();
 void exitSystem();
 
-// 上机下机服务函数
-int doLogon(const char *cardNumber, const char *password, LogonInfo *logonInfo);
-int doSettle(const char *cardNumber, const char *password, SettleInfo *settleInfo);
-int doAddMoney(const char *cardNumber, const char *password, float money, MoneyInfo *moneyInfo);
-int doRefundMoney(const char *cardNumber, const char *password, MoneyInfo *moneyInfo);
-int doAnnulCard(const char *cardNumber, const char *password, MoneyInfo *moneyInfo);
-int doQueryStatistics(StatisticsInfo *statisticsInfo);
-float getAmount(time_t start, time_t end);
-
-#endif // SERVICE_H
+// 核心业务服务 (参数改为 const std::string& 避免拷贝，输出参数改为引用 &)
+OpResult doLogon(const std::string& cardNumber, const std::string& password, LogonInfo& logonInfo);
+OpResult doSettle(const std::string& cardNumber, const std::string& password, SettleInfo& settleInfo);
+OpResult doAddMoney(const std::string& cardNumber, const std::string& password, float money, MoneyInfo& moneyInfo);
+OpResult doRefundMoney(const std::string& cardNumber, const std::string& password, MoneyInfo& moneyInfo);
+OpResult doAnnulCard(const std::string& cardNumber, const std::string& password, MoneyInfo& moneyInfo);
+OpResult doQueryStatistics(StatisticsInfo& statisticsInfo);

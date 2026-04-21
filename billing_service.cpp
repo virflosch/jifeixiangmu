@@ -1,169 +1,100 @@
-#define _CRT_SECURE_NO_WARNINGS
-
-#include "global.h"
 #include "billing_service.h"
-#include "billing_file.h"
-#include <cstring>
+#include "billing_file.h" // 文件层下一步重构
 #include <cmath>
+#include <ctime>
 
-// 全局计费链表头指针
-IpBillingNode billingList = nullptr;
+// 全局计费动态数组
+std::vector<Billing> g_billingList;
 
-// 初始化计费链表
-int initBillingList()
-{
-    // 创建头结点
-    billingList = new BillingNode;
-    if (billingList == nullptr)
-    {
-        return -1; // 内存分配失败
-    }
-    // 初始化头结点
-    memset(&billingList->data, 0, sizeof(Billing));
-    billingList->next = nullptr;
-    return 0; // 成功
+// 初始化计费链表（只需清空）
+void initBillingList() {
+    g_billingList.clear();
 }
 
 // 释放计费链表
-void releaseBillingList()
-{
-    IpBillingNode current = billingList;
-    while (current != nullptr)
-    {
-        IpBillingNode temp = current;
-        current = current->next;
-        delete temp;
-    }
-    billingList = nullptr;
+void releaseBillingList() {
+    g_billingList.clear();
 }
 
 // 添加计费记录
-int addBilling(const char *cardNumber, time_t start, time_t end, float amount)
-{
-    // 创建新计费记录
-    IpBillingNode newNode = new BillingNode;
-    if (newNode == nullptr)
-    {
-        return -1; // 内存分配失败
+OpResult addBilling(const std::string& cardNumber, time_t start, time_t end, float amount) {
+    Billing newBilling;
+    newBilling.aCardName = cardNumber;
+    newBilling.tStart = start;
+    newBilling.tEnd = end;
+    newBilling.fAmount = amount;
+    newBilling.nStatus = BillingStatus::Unsettled;
+    newBilling.nDel = DeleteStatus::NotDeleted;
+
+    g_billingList.push_back(newBilling);
+
+    // 调用文件层同步到硬盘
+    if (saveBilling(newBilling) != OpResult::Success) { 
+        // 写入失败则回滚内存
+        g_billingList.pop_back();
+        return OpResult::Failed; 
     }
 
-    // 初始化新结点
-    strcpy(newNode->data.aCardName, cardNumber);
-    newNode->data.tStart = start;
-    newNode->data.tEnd = end;
-    newNode->data.fAmount = amount;
-    newNode->data.nStatus = BILLING_STATUS_UNSETTLED;
-    newNode->data.nDel = NOT_DELETED;
-    newNode->next = nullptr;
-
-    // 插入链表尾部
-    IpBillingNode current = billingList;
-    while (current->next != nullptr)
-    {
-        current = current->next;
-    }
-    current->next = newNode;
-
-    // 保存到文件
-    if (saveBilling(&newNode->data) != 0)
-    {
-        return -2; // 保存文件失败
-    }
-
-    return 0; // 成功
+    return OpResult::Success;
 }
 
 // 查询卡的未结算计费记录
-int queryBilling(const char *cardNumber, Billing *billing)
-{
-    if (billingList == nullptr || billingList->next == nullptr)
-    {
-        return -1; // 链表为空
-    }
-
-    IpBillingNode current = billingList->next;
-    while (current != nullptr)
-    {
-        if (strcmp(current->data.aCardName, cardNumber) == 0 &&
-            current->data.nStatus == BILLING_STATUS_UNSETTLED &&
-            current->data.nDel == NOT_DELETED)
-        {
-            *billing = current->data;
-            return 0; // 找到未结算记录
+OpResult queryBilling(const std::string& cardNumber, Billing& billing) {
+    for (const auto& record : g_billingList) {
+        if (record.aCardName == cardNumber && 
+            record.nStatus == BillingStatus::Unsettled && 
+            record.nDel == DeleteStatus::NotDeleted) {
+            billing = record; // 直接拷贝赋值
+            return OpResult::Success;
         }
-        current = current->next;
     }
-
-    return -1; // 没有找到未结算记录
-}
-
-// 从文件加载计费记录
-int getBilling()
-{
-    // 清空链表
-    releaseBillingList();
-    initBillingList();
-
-    // 从文件加载
-    int count = loadBillings();
-    return count;
+    return OpResult::Failed; // 没有找到未结算记录
 }
 
 // 结算计费记录
-int settleBilling(const char *cardNumber, SettleInfo *settleInfo)
-{
-    // 查找未结算的计费记录
+OpResult settleBilling(const std::string& cardNumber, SettleInfo& settleInfo) {
     Billing billing;
-    int result = queryBilling(cardNumber, &billing);
-    if (result != 0)
-    {
-        return -1; // 没有找到未结算记录
+    if (queryBilling(cardNumber, billing) != OpResult::Success) {
+        return OpResult::Failed; // 没有找到未结算记录
     }
 
     // 计算消费金额
-    time_t now = time(nullptr);
-    double seconds = difftime(now, billing.tStart);
-    double minutes = seconds / 60;
-    int units = static_cast<int>(ceil(minutes / UNIT));
-    float amount = units * CHARGE;
+    time_t now = std::time(nullptr);
+    double seconds = std::difftime(now, billing.tStart);
+    double minutes = seconds / 60.0;
+    
+    // Config::UNIT 和 Config::CHARGE 是我们在 global.h 里定义的常量
+    int units = static_cast<int>(std::ceil(minutes / Config::UNIT));
+    float amount = units * Config::CHARGE;
 
     // 填充结算信息
-    strcpy(settleInfo->aCardName, cardNumber);
-    settleInfo->tStart = billing.tStart;
-    settleInfo->tEnd = now;
-    settleInfo->fAmount = amount;
+    settleInfo.aCardName = cardNumber;
+    settleInfo.tStart = billing.tStart;
+    settleInfo.tEnd = now;
+    settleInfo.fAmount = amount;
 
-    return 0; // 成功
+    return OpResult::Success;
 }
 
 // 更新计费记录
-int updateBilling(const Billing *billing)
-{
-    if (billingList == nullptr || billingList->next == nullptr)
-    {
-        return -1; // 链表为空
-    }
+OpResult updateBilling(const Billing& billing) {
+    for (auto& record : g_billingList) {
+        // 通过卡号、上机时间和未结算状态来定位那条唯一的记录
+        if (record.aCardName == billing.aCardName &&
+            record.tStart == billing.tStart &&
+            record.nStatus == BillingStatus::Unsettled) {
+            
+           Billing oldBilling = record; // 备份旧数据
+            record = billing;            // 更新内存数据
 
-    // 查找并更新链表中的记录
-    IpBillingNode current = billingList->next;
-    while (current != nullptr)
-    {
-        if (strcmp(current->data.aCardName, billing->aCardName) == 0 &&
-            current->data.tStart == billing->tStart &&
-            current->data.nStatus == BILLING_STATUS_UNSETTLED)
-        {
-            // 更新链表中的记录
-            current->data = *billing;
-
-            // 更新文件中的记录
-            if (updateBillingInFile(billing) != 0) {
-                return -2; // 更新文件失败
+            // 全量同步到文件
+            if (updateBillingToFile() != OpResult::Success) { 
+                record = oldBilling;     // 写入失败则回滚
+                return OpResult::Failed; 
             }
 
-            return 0; // 成功
+            return OpResult::Success;
         }
-        current = current->next;
     }
-
-    return -3; // 未找到记录
+    return OpResult::Failed; // 未找到记录
 }
